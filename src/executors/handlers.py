@@ -70,9 +70,8 @@ class SimulateWorkHandler(TaskHandlerProtocol):
     
     def __init__(self, base_delay: float = 0.5, jitter: float = 0.2):
         """
-        Args:
-            base_delay: Базовая задержка в секундах
-            jitter: Случайное отклонение (±jitter)
+        :param base_delay: Базовая задержка в секундах
+        :param jitter: Случайное отклонение
         """
         self._base_delay = base_delay
         self._jitter = jitter
@@ -143,4 +142,3 @@ class RobustHandler(TaskHandlerProtocol):
         """Очищает внутреннее состояние."""
         self._attempts.clear()
         logger.debug("RobustHandler: состояние очищено")
-        
