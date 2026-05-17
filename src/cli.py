@@ -1,3 +1,5 @@
+import asyncio
+from datetime import datetime
 import sys
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -7,6 +9,13 @@ from src.base_classes.task import Task
 from src.base_classes.task_manager import TaskManager
 from src.base_classes.task_queue import TaskQueue
 from src.sources.registry import REGISTRY
+from src.executors.async_executor import AsyncTaskExecutor
+from src.executors.handlers import (
+    LoggingHandler,
+    PriorityBasedHandler,
+    SimulateWorkHandler,
+    RobustHandler,
+)
 
 # хранилище задач (для демонстрации)
 tasks_storage: Dict[str, Task] = {}
@@ -170,8 +179,25 @@ def display_instructions() -> None:
           
 14. queue-process - Демонстрирует потоковую обработку задач
     Пример: queue-process
+          
+15. async-demo - Демонстрация работы асинхронного обработчика
+    Пример: async-demo
 
-15. exit - Выход из программы
+16. async-interactive - Переход в режим интерактивной асинхронной обработки.
+    В этом режиме доступно несколько команд:
+        add <id> <title> [priority]  - Добавить задачу
+        add-test <n>                 - Добавить n тестовых задач
+        status                       - Показать статус обработки
+        workers <n>                  - Изменить количество воркеров (будет перезапуск)
+        handler <type>               - Сменить обработчика (logging/priority/work/robust)
+        stop                         - Остановить обработку и выйти
+    Пример:
+    async-interactive
+    add-test 8
+    status
+    stop
+          
+17. exit - Выход из программы
     Пример: exit
 
 """)
@@ -489,6 +515,217 @@ def queue_process_demo() -> None:
         print(d)
 
 
+@cli.command("async-demo")
+def async_demo() -> None:
+    """Демонстрирует базовую асинхронную обработку задач"""
+    if not tasks_storage:
+        print("Нет задач для обработки. Сначала создайте задачи через 'create' или 'read'")
+        return
+    
+    print("\nДемонстрация асинхронной обработки задач\n")
+    print(f"Доступно задач для обработки: {len(tasks_storage)}")
+    print("Выберите тип обработчика:")
+    print("  1 - LoggingHandler (простое логирование)")
+    print("  2 - PriorityBasedHandler (зависимость от приоритета)")
+    print("  3 - SimulateWorkHandler (имитация реальной работы)")
+    print("  4 - RobustHandler (с обработкой ошибок)")
+    
+    choice = input("Ваш выбор (1-4): ").strip()
+    
+    handlers = {
+        "1": LoggingHandler(),
+        "2": PriorityBasedHandler(),
+        "3": SimulateWorkHandler(base_delay=0.3),
+        "4": RobustHandler(fail_probability=0.2, max_retries=2),
+    }
+    
+    handler = handlers.get(choice)
+    if not handler:
+        print("Неверный выбор, используем LoggingHandler")
+        handler = LoggingHandler()
+    
+    workers = input("Количество воркеров (по умолчанию 2): ").strip()
+    workers = int(workers) if workers.isdigit() else 2
+
+    tasks = list(tasks_storage.values())
+    
+    print(f"\nЗапуск асинхронной обработки {len(tasks)} задач...")
+    
+    async def run_demo():
+        async with AsyncTaskExecutor(handler, workers=workers, name="cli-demo") as executor:
+            await executor.submit_batch(tasks)
+            await asyncio.sleep(0.5)
+            while executor.queue_size > 0:
+                await asyncio.sleep(0.5)
+        
+        print("\n")
+        print("Статистика обработки:")
+        print(f"  Всего отправлено: {executor.stats['submitted']}")
+        print(f"  Успешно обработано: {executor.stats['completed']}")
+        print(f"  С ошибками: {executor.stats['failed']}")
+    
+    asyncio.run(run_demo())
+
+
+@cli.command("async-interactive")
+def async_interactive() -> None:
+    """
+    Интерактивный режим асинхронной обработки.
+    Позволяет в реальном времени добавлять задачи в очередь и наблюдать за их обработкой.
+    """
+    print("\nИнтерактивный режим асинхронной обработки\n")
+    print("Вы можете добавлять задачи, и они будут обрабатываться в реальном времени.")
+    print("Команды:")
+    print("  add <id> <title> [priority]  - Добавить задачу")
+    print("  add-test <n>                 - Добавить n тестовых задач")
+    print("  status                       - Показать статус обработки")
+    print("  workers <n>                  - Изменить количество воркеров (будет перезапуск)")
+    print("  handler <type>               - Сменить обработчика (logging/priority/work/robust)")
+    print("  stop                         - Остановить обработку и выйти")
+    print()
+    
+    current_workers = 2
+    current_handler = LoggingHandler()
+    executor = None
+    executor_task = None
+    running = True
+    
+    handlers_map = {
+        "logging": LoggingHandler,
+        "priority": PriorityBasedHandler,
+        "work": lambda: SimulateWorkHandler(base_delay=0.2),
+        "robust": lambda: RobustHandler(fail_probability=0.2, max_retries=2),
+    }
+    
+    async def run_executor():
+        nonlocal executor
+        while running:
+            try:
+                async with AsyncTaskExecutor(current_handler, workers=current_workers, name="interactive") as exec_instance:
+                    executor = exec_instance
+                    print(f"\nИсполнитель запущен: {current_workers} воркеров, обработчик={type(current_handler).__name__}")
+                    # ждем, пока не будет сигнала к остановке
+                    while running:
+                        await asyncio.sleep(0.5)
+                        if executor and executor.queue_size > 0:
+                            # проказываем статус каждые 2 секунды
+                            if int(datetime.now().timestamp()) % 4 < 0.5:
+                                print(f"\rВ очереди: {executor.queue_size} | Обработано: {executor.stats['completed']} | Ошибок: {executor.stats['failed']}", end="", flush=True)
+            except Exception as e:
+                print(f"\nОшибка исполнителя: {e}")
+                await asyncio.sleep(1)
+    
+    async def interactive_loop():
+        nonlocal current_workers, current_handler, executor, running
+        
+        # Запускаем исполнителя в фоне
+        exec_task = asyncio.create_task(run_executor())
+        
+        try:
+            while running:
+                cmd = await asyncio.get_event_loop().run_in_executor(None, input, "\n> ")
+                cmd = cmd.strip().lower()
+                
+                if not cmd:
+                    continue
+                
+                if cmd == "stop":
+                    print("Остановка обработки...")
+                    running = False
+                    break
+                
+                elif cmd == "status":
+                    if executor:
+                        print(f"\nСтатус:")
+                        print(f"  В очереди: {executor.queue_size}")
+                        print(f"  Обработано: {executor.stats['completed']}")
+                        print(f"  Ошибок: {executor.stats['failed']}")
+                        print(f"  Всего отправлено: {executor.stats['submitted']}")
+                    else:
+                        print("Исполнитель не запущен")
+                
+                elif cmd.startswith("workers"):
+                    parts = cmd.split()
+                    if len(parts) == 2 and parts[1].isdigit():
+                        new_workers = int(parts[1])
+                        if new_workers >= 1:
+                            current_workers = new_workers
+                            print(f"Количество воркеров изменено на {current_workers}. Перезапуск исполнителя...")
+                            running = False
+                            await asyncio.sleep(1)
+                            running = True
+                            exec_task = asyncio.create_task(run_executor())
+                        else:
+                            print("Количество воркеров должно быть >= 1")
+                    else:
+                        print("Использование: workers <число>")
+                
+                elif cmd.startswith("handler"):
+                    parts = cmd.split()
+                    if len(parts) == 2 and parts[1] in handlers_map:
+                        current_handler = handlers_map[parts[1]]()
+                        print(f"Обработчик изменен на {type(current_handler).__name__}. Перезапуск исполнителя...")
+                        running = False
+                        await asyncio.sleep(1)
+                        running = True
+                        exec_task = asyncio.create_task(run_executor())
+                    else:
+                        print(f"Доступные обработчики: {', '.join(handlers_map.keys())}")
+                
+                elif cmd.startswith("add-test"):
+                    parts = cmd.split()
+                    n = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 5
+                    n = min(n, 100)
+                    
+                    for i in range(n):
+                        task = Task(
+                            id=f"test_{datetime.now().strftime('%H%M%S')}_{i}",
+                            title=f"Тестовая задача {i}",
+                            author="interactive",
+                            content=f"Автоматически созданная задача {i}",
+                            priority=(i % 5) + 1
+                        )
+                        if executor:
+                            await executor.submit(task)
+                    print(f"Добавлено {n} тестовых задач")
+                
+                elif cmd.startswith("add"):
+                    parts = cmd.split()
+                    if len(parts) >= 3:
+                        task_id = parts[1]
+                        title = " ".join(parts[2:5]) if len(parts) > 3 else parts[2]
+                        priority = int(parts[-1]) if parts[-1].isdigit() else 3
+                        
+                        task = Task(
+                            id=task_id,
+                            title=title[:50],
+                            author="interactive",
+                            content="Интерактивная задача",
+                            priority=priority
+                        )
+                        if executor:
+                            await executor.submit(task)
+                            print(f"Задача '{task_id}' добавлена в очередь")
+                        else:
+                            print("Исполнитель не готов")
+                    else:
+                        print("Использование: add <id> <title> [priority]")
+                
+                else:
+                    print("Неизвестная команда. Доступны: add, add-test, status, workers, handler, stop")
+        
+        except KeyboardInterrupt:
+            print("\n\nПрерывание...")
+            running = False
+        finally:
+            if executor:
+                await asyncio.sleep(2)
+            exec_task.cancel()
+
+    asyncio.run(interactive_loop())
+    print("\nИнтерактивный режим завершен")
+
+
 def main_loop() -> None:
     """Главный цикл программы"""
     print("Добро пожаловать в систему управления задачами!")
@@ -532,6 +769,9 @@ def main_loop() -> None:
             temp_cli.command("queue-demo")(demonstrate_queue)
             temp_cli.command("queue-filter")(filter_queue)
             temp_cli.command("queue-process")(queue_process_demo)
+            temp_cli.command("async-demo")(async_demo)
+            temp_cli.command("async-interactive")(async_interactive)
+            
 
             try:
                 sys.argv = ["temp_cli"] + [cmd] + args
